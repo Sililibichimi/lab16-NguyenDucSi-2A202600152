@@ -42,6 +42,8 @@ Theo mặc định, AWS khóa hạn mức sử dụng máy chủ GPU của các 
 5. Nhập số **4** (tương đương 4 vCPU cho 1 máy `g4dn.xlarge`). 
 *Lưu ý: AWS có thể mất từ vài phút đến vài giờ để duyệt yêu cầu này.*
 
+> **⚠️ Ghi chú quan trọng cho tài khoản mới / Free Tier:** Nếu yêu cầu tăng quota GPU bị từ chối hoặc chưa được duyệt trong thời gian làm lab, hãy chuyển sang **[Phần 7: Phương án Dự phòng — CPU Instance với LightGBM](#phần-7-phương-án-dự-phòng--cpu-instance-với-lightgbm-khi-không-xin-được-quota-gpu)**. Đây là phương án thay thế hợp lệ và sẽ được chấm điểm tương đương.
+
 ---
 
 ## Phần 2: Cài đặt và cấu hình môi trường Local
@@ -154,3 +156,145 @@ Chạy lệnh sau trong thư mục `terraform`:
 terraform destroy
 ```
 Gõ `yes` khi được hỏi. Quá trình xóa sẽ mất khoảng 5 phút. Hãy đợi đến khi terminal báo `Destroy complete!` để chắc chắn mọi thứ đã bị xóa.
+
+---
+
+## Phần 7: Phương án Dự phòng — CPU Instance với LightGBM (Khi không xin được Quota GPU)
+
+> **Ghi chú (tiếng Việt):** Đây là phương án dành cho các bạn dùng tài khoản AWS mới hoặc Free Tier. Do các tài khoản mới bị hạn chế quota GPU nghiêm ngặt (mặc định = 0 vCPU cho dòng G/VT), yêu cầu tăng quota thường bị trì hoãn hoặc từ chối. Thay vì bỏ qua bài lab, bạn sẽ chuyển sang triển khai một **bài toán Machine Learning thực tế** (LightGBM — gradient boosting) trên một **instance CPU cao cấp**. Quy trình này vẫn đầy đủ: Terraform IaC → Cloud instance → Training → Inference → Billing check, chỉ khác là không cần GPU.
+
+### 7.1: Thay đổi instance type trong Terraform
+
+Mở file `terraform/main.tf` và tìm dòng khai báo GPU Node (khoảng dòng 209):
+
+```hcl
+# Trước (GPU):
+instance_type = "g4dn.xlarge"
+
+# Sau (CPU cao cấp — 8 vCPU, 32 GB RAM):
+instance_type = "r5.2xlarge"
+```
+
+> **Tại sao `r5.2xlarge`?** Instance này có 8 vCPU và 32 GB RAM, không yêu cầu quota đặc biệt, đủ mạnh để chạy gradient boosting với dataset hàng trăm nghìn dòng và không cần Deep Learning AMI. Chi phí ~$0.504/giờ tại us-east-1 — tương đương `g4dn.xlarge` (~$0.526/giờ).
+
+Ngoài ra, cập nhật AMI trong cùng resource sang Amazon Linux 2023 thông thường (không cần Deep Learning AMI):
+
+```bash
+# Lấy AMI ID của Amazon Linux 2023 tại us-east-1
+aws ec2 describe-images \
+  --region us-east-1 \
+  --owners amazon \
+  --filters "Name=name,Values=al2023-ami-*-x86_64" \
+            "Name=state,Values=available" \
+  --query "sort_by(Images, &CreationDate)[-1].ImageId" \
+  --output text
+```
+
+Sau đó thay giá trị AMI trong `main.tf` GPU Node block bằng AMI ID vừa lấy được.
+
+### 7.2: Triển khai hạ tầng
+
+```bash
+cd terraform
+export TF_VAR_hf_token="dummy"   # Không cần HF token khi chạy LGBM
+terraform apply
+```
+
+Gõ `yes` khi được hỏi. Quá trình tạo hạ tầng (NAT Gateway, ALB) mất khoảng **10–15 phút** như bình thường.
+
+### 7.3: Kết nối vào CPU Instance
+
+Từ Terraform outputs, lấy `bastion_public_ip` và `gpu_private_ip` (bây giờ là CPU node):
+
+```bash
+# SSH vào Bastion Host
+ssh -i <KEY_FILE>.pem ec2-user@<BASTION_PUBLIC_IP>
+
+# Từ Bastion, SSH vào CPU Node
+ssh ec2-user@<CPU_PRIVATE_IP>
+```
+
+### 7.4: Cài đặt môi trường ML
+
+Trên CPU Node, chạy các lệnh sau:
+
+```bash
+# Cập nhật hệ thống và cài Python packages
+sudo dnf update -y
+sudo dnf install -y python3 python3-pip
+
+pip3 install --upgrade pip
+pip3 install lightgbm scikit-learn pandas numpy kaggle
+
+# Tạo thư mục làm việc
+mkdir -p ~/ml-benchmark && cd ~/ml-benchmark
+```
+
+### 7.5: Tải Dataset từ Kaggle
+
+Chúng ta sẽ dùng **Credit Card Fraud Detection** — bộ dữ liệu chuẩn cho benchmark ML với 284,807 giao dịch thực.
+
+**Lấy Kaggle API Key:**
+1. Đăng nhập [kaggle.com](https://www.kaggle.com) -> **Settings** -> **API** -> **Create New Token** -> tải về `kaggle.json`.
+2. Copy nội dung file vào máy EC2:
+
+```bash
+mkdir -p ~/.kaggle
+# Tạo file credentials (thay YOUR_USERNAME và YOUR_KEY):
+cat > ~/.kaggle/kaggle.json << 'EOF'
+{"username": "YOUR_KAGGLE_USERNAME", "key": "YOUR_KAGGLE_API_KEY"}
+EOF
+chmod 600 ~/.kaggle/kaggle.json
+
+# Tải dataset
+kaggle datasets download -d mlg-ulb/creditcardfraud --unzip -p ~/ml-benchmark/
+```
+
+### 7.6: Kết quả Benchmark trên `r5.2xlarge`
+
+| Metric | Kết quả |
+|---|---|
+| Thời gian load data | |
+| Thời gian training | |
+| Best iteration | |
+| AUC-ROC | |
+| Accuracy | |
+| F1-Score | |
+| Precision | |
+| Recall | |
+| Inference latency (1 row) | |
+| Inference throughput (1000 rows) | |
+
+### 7.7: Kiểm tra Chi phí sau 1 giờ
+
+Sau khi chạy benchmark xong, **đợi tổng cộng 1 giờ** kể từ lúc `terraform apply` hoàn tất rồi kiểm tra chi phí:
+
+1. Vào [AWS Billing Console](https://console.aws.amazon.com/billing/) -> **Bills** hoặc **Cost Explorer**.
+2. Chọn ngày hôm nay để xem chi phí hiện tại.
+3. Chụp màn hình thể hiện các dịch vụ phát sinh chi phí.
+
+**Ước tính chi phí 1 giờ (us-east-1):**
+
+| Dịch vụ | Instance/Loại | Chi phí/giờ |
+|---|---|---|
+| EC2 — CPU Node | `r5.2xlarge` | ~$0.504 |
+| EC2 — Bastion | `t3.micro` | ~$0.010 |
+| NAT Gateway | (mỗi AZ) | ~$0.045 + data |
+| ALB | Application Load Balancer | ~$0.008 |
+| **Tổng ước tính** | | **~$0.57/giờ** |
+
+> **Ghi chú (tiếng Việt):** Chi phí thực tế có thể dao động nhẹ tùy vào lượng data transfer. Hãy chụp màn hình billing ngay sau 1 giờ rồi chạy `terraform destroy` để tránh phát sinh thêm chi phí. Instance CPU `r5.2xlarge` có chi phí tương đương GPU `g4dn.xlarge` (~$0.526/giờ) nhưng không cần xin quota đặc biệt — đây là điểm khác biệt quan trọng khi làm việc với tài khoản mới.
+
+### 7.8: Tiêu chí nộp bài (Phương án CPU thay thế)
+
+Nếu sử dụng phương án CPU + LightGBM, nộp các mục sau (được chấm tương đương phương án GPU):
+
+1. **Screenshot terminal** chạy `python3 benchmark.py` với toàn bộ output kết quả.
+2. **File `benchmark_result.json`** chứa metrics đầy đủ (training time, AUC, inference latency).
+3. **Screenshot AWS Billing** sau 1 giờ triển khai, thể hiện EC2 và NAT Gateway.
+4. **Mã nguồn** thư mục `terraform/` đã chỉnh sửa (với `r5.2xlarge`).
+5. **Báo cáo ngắn** (5–10 dòng): so sánh kết quả training time, AUC, inference speed; giải thích lý do phải dùng CPU thay GPU.
+
+---
+
+> **Lưu ý cuối (tiếng Việt):** Dù chạy GPU hay CPU, **bước dọn dẹp (Phần 6 — `terraform destroy`) là bắt buộc** ngay sau khi nộp bài. Instance `r5.2xlarge` và NAT Gateway vẫn tính phí liên tục theo giờ dù không có tác vụ nào đang chạy.
